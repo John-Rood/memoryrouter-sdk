@@ -1,6 +1,6 @@
 # MemoryRouter
 
-**Persistent memory for any AI model.** Drop-in OpenAI-compatible API that adds long-term memory to ChatGPT, Claude, Gemini, and 90+ other models.
+**Persistent memory for any AI model.** One API that adds long-term memory to ChatGPT, Claude, Gemini, Grok, and 90+ other models.
 
 🌐 [Homepage](https://memoryrouter.ai) · 📚 [Documentation](https://docs.memoryrouter.ai) · 🎮 [Dashboard](https://memoryrouter.ai/dashboard)
 
@@ -42,7 +42,7 @@ The AI now remembers your favorite color is blue — across sessions, devices, a
 
 ## Features
 
-- **Drop-in replacement** — Same OpenAI API format you already use
+- **Drop-in replacement** — Works with your existing code, just change the base URL
 - **Works with any model** — OpenAI, Anthropic, Google, xAI (90+ models)
 - **Automatic memory** — No manual embedding or retrieval code
 - **Cross-model memory** — Start with GPT, continue with Claude
