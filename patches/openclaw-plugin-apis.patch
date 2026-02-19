@@ -1,0 +1,278 @@
+diff --git a/extensions/lobster/src/lobster-tool.test.ts b/extensions/lobster/src/lobster-tool.test.ts
+index 50971e48ba6c..a181e71ea3aa 100644
+--- a/extensions/lobster/src/lobster-tool.test.ts
++++ b/extensions/lobster/src/lobster-tool.test.ts
+@@ -38,6 +38,9 @@ function fakeApi(overrides: Partial<OpenClawPluginApi> = {}): OpenClawPluginApi
+     registerHttpRoute() {},
+     registerCommand() {},
+     on() {},
++    registerStreamFnWrapper() {},
++    updatePluginConfig: async () => {},
++    updatePluginEnabled: async () => {},
+     resolvePath: (p) => p,
+     ...overrides,
+   };
+diff --git a/src/agents/pi-embedded-runner/run/attempt.ts b/src/agents/pi-embedded-runner/run/attempt.ts
+index 364448eb89d2..246588901bae 100644
+--- a/src/agents/pi-embedded-runner/run/attempt.ts
++++ b/src/agents/pi-embedded-runner/run/attempt.ts
+@@ -661,6 +661,17 @@ export async function runEmbeddedAttempt(
+         );
+       }
+ 
++      // Apply plugin-registered streamFn wrappers
++      {
++        const { getGlobalPluginRegistry } = await import("../../../plugins/hook-runner-global.js");
++        const pluginRegistry = getGlobalPluginRegistry();
++        if (pluginRegistry?.streamFnWrappers?.length) {
++          for (const { wrapper } of pluginRegistry.streamFnWrappers) {
++            activeSession.agent.streamFn = wrapper(activeSession.agent.streamFn);
++          }
++        }
++      }
++
+       try {
+         const prior = await sanitizeSessionHistory({
+           messages: activeSession.messages,
+diff --git a/src/auto-reply/reply/route-reply.test.ts b/src/auto-reply/reply/route-reply.test.ts
+index 7712de8c7d6b..af656be05da0 100644
+--- a/src/auto-reply/reply/route-reply.test.ts
++++ b/src/auto-reply/reply/route-reply.test.ts
+@@ -74,6 +74,7 @@ const createRegistry = (channels: PluginRegistry["channels"]): PluginRegistry =>
+   httpRoutes: [],
+   cliRegistrars: [],
+   services: [],
++  streamFnWrappers: [],
+   diagnostics: [],
+ });
+ 
+diff --git a/src/gateway/server-plugins.test.ts b/src/gateway/server-plugins.test.ts
+index 7fb34ff5efce..2eff36af2cfc 100644
+--- a/src/gateway/server-plugins.test.ts
++++ b/src/gateway/server-plugins.test.ts
+@@ -22,6 +22,7 @@ const createRegistry = (diagnostics: PluginDiagnostic[]): PluginRegistry => ({
+   httpRoutes: [],
+   cliRegistrars: [],
+   services: [],
++  streamFnWrappers: [],
+   diagnostics,
+ });
+ 
+diff --git a/src/gateway/server.agent.gateway-server-agent.mocks.ts b/src/gateway/server.agent.gateway-server-agent.mocks.ts
+index 3dd42d4ab40b..34a055bddf0a 100644
+--- a/src/gateway/server.agent.gateway-server-agent.mocks.ts
++++ b/src/gateway/server.agent.gateway-server-agent.mocks.ts
+@@ -16,6 +16,7 @@ export const registryState: { registry: PluginRegistry } = {
+     cliRegistrars: [],
+     services: [],
+     commands: [],
++    streamFnWrappers: [],
+     diagnostics: [],
+   } as PluginRegistry,
+ };
+diff --git a/src/gateway/test-helpers.mocks.ts b/src/gateway/test-helpers.mocks.ts
+index 5ebdc7859e4f..0d97cb1409e9 100644
+--- a/src/gateway/test-helpers.mocks.ts
++++ b/src/gateway/test-helpers.mocks.ts
+@@ -142,6 +142,7 @@ const createStubPluginRegistry = (): PluginRegistry => ({
+   cliRegistrars: [],
+   services: [],
+   commands: [],
++  streamFnWrappers: [],
+   diagnostics: [],
+ });
+ 
+diff --git a/src/plugin-sdk/index.ts b/src/plugin-sdk/index.ts
+index 47ef9f24794e..a6d151fc781b 100644
+--- a/src/plugin-sdk/index.ts
++++ b/src/plugin-sdk/index.ts
+@@ -68,7 +68,9 @@ export type {
+   OpenClawPluginServiceContext,
+   ProviderAuthContext,
+   ProviderAuthResult,
++  StreamFnWrapperFn,
+ } from "../plugins/types.js";
++export type { StreamFn } from "@mariozechner/pi-agent-core";
+ export type {
+   GatewayRequestHandler,
+   GatewayRequestHandlerOptions,
+diff --git a/src/plugins/registry.ts b/src/plugins/registry.ts
+index cf709c5713d5..ba782beb7aa1 100644
+--- a/src/plugins/registry.ts
++++ b/src/plugins/registry.ts
+@@ -32,6 +32,7 @@ import type {
+   PluginHookName,
+   PluginHookHandlerMap,
+   PluginHookRegistration as TypedPluginHookRegistration,
++  StreamFnWrapperFn,
+ } from "./types.js";
+ 
+ export type PluginToolRegistration = {
+@@ -94,6 +95,12 @@ export type PluginCommandRegistration = {
+   source: string;
+ };
+ 
++export type PluginStreamFnWrapperRegistration = {
++  pluginId: string;
++  wrapper: StreamFnWrapperFn;
++  source: string;
++};
++
+ export type PluginRecord = {
+   id: string;
+   name: string;
+@@ -134,6 +141,7 @@ export type PluginRegistry = {
+   cliRegistrars: PluginCliRegistration[];
+   services: PluginServiceRegistration[];
+   commands: PluginCommandRegistration[];
++  streamFnWrappers: PluginStreamFnWrapperRegistration[];
+   diagnostics: PluginDiagnostic[];
+ };
+ 
+@@ -157,6 +165,7 @@ export function createEmptyPluginRegistry(): PluginRegistry {
+     cliRegistrars: [],
+     services: [],
+     commands: [],
++    streamFnWrappers: [],
+     diagnostics: [],
+   };
+ }
+@@ -462,6 +471,54 @@ export function createPluginRegistry(registryParams: PluginRegistryParams) {
+     } as TypedPluginHookRegistration);
+   };
+ 
++  const registerStreamFnWrapper = (record: PluginRecord, wrapper: StreamFnWrapperFn) => {
++    registry.streamFnWrappers.push({
++      pluginId: record.id,
++      wrapper,
++      source: record.source,
++    });
++  };
++
++  const updatePluginConfig = async (record: PluginRecord, newConfig: Record<string, unknown>) => {
++    // Dynamic import to avoid side effects at module load time
++    const { loadConfig, writeConfigFile } = await import("../config/io.js");
++    const currentConfig = loadConfig();
++    const updated = {
++      ...currentConfig,
++      plugins: {
++        ...currentConfig.plugins,
++        entries: {
++          ...currentConfig.plugins?.entries,
++          [record.id]: {
++            ...currentConfig.plugins?.entries?.[record.id],
++            config: newConfig,
++          },
++        },
++      },
++    };
++    await writeConfigFile(updated);
++  };
++
++  const updatePluginEnabled = async (record: PluginRecord, enabled: boolean) => {
++    // Dynamic import to avoid side effects at module load time
++    const { loadConfig, writeConfigFile } = await import("../config/io.js");
++    const currentConfig = loadConfig();
++    const updated = {
++      ...currentConfig,
++      plugins: {
++        ...currentConfig.plugins,
++        entries: {
++          ...currentConfig.plugins?.entries,
++          [record.id]: {
++            ...currentConfig.plugins?.entries?.[record.id],
++            enabled,
++          },
++        },
++      },
++    };
++    await writeConfigFile(updated);
++  };
++
+   const normalizeLogger = (logger: PluginLogger): PluginLogger => ({
+     info: logger.info,
+     warn: logger.warn,
+@@ -499,6 +556,9 @@ export function createPluginRegistry(registryParams: PluginRegistryParams) {
+       registerCommand: (command) => registerCommand(record, command),
+       resolvePath: (input: string) => resolveUserPath(input),
+       on: (hookName, handler, opts) => registerTypedHook(record, hookName, handler, opts),
++      registerStreamFnWrapper: (wrapper) => registerStreamFnWrapper(record, wrapper),
++      updatePluginConfig: (newConfig) => updatePluginConfig(record, newConfig),
++      updatePluginEnabled: (enabled) => updatePluginEnabled(record, enabled),
+     };
+   };
+ 
+@@ -515,5 +575,6 @@ export function createPluginRegistry(registryParams: PluginRegistryParams) {
+     registerCommand,
+     registerHook,
+     registerTypedHook,
++    registerStreamFnWrapper,
+   };
+ }
+diff --git a/src/plugins/types.ts b/src/plugins/types.ts
+index fc54fdece8a3..d5de6e979895 100644
+--- a/src/plugins/types.ts
++++ b/src/plugins/types.ts
+@@ -19,6 +19,16 @@ import type { PluginRuntime } from "./runtime/types.js";
+ export type { PluginRuntime } from "./runtime/types.js";
+ export type { AnyAgentTool } from "../agents/tools/common.js";
+ 
++// Re-export StreamFn from pi-agent-core for plugin authors
++// eslint-disable-next-line @typescript-eslint/no-explicit-any
++type StreamFnInternal = (...args: any[]) => any;
++
++/**
++ * A function that wraps the agent's streamFn to intercept, modify, or proxy LLM API calls.
++ * Multiple wrappers compose in registration order.
++ */
++export type StreamFnWrapperFn = (next: StreamFnInternal) => StreamFnInternal;
++
+ export type PluginLogger = {
+   debug?: (message: string) => void;
+   info: (message: string) => void;
+@@ -280,6 +290,21 @@ export type OpenClawPluginApi = {
+     handler: PluginHookHandlerMap[K],
+     opts?: { priority?: number },
+   ) => void;
++  /**
++   * Register a wrapper around the agent's streamFn to intercept, modify, or proxy LLM API calls.
++   * Multiple wrappers compose in registration order (after internal wrappers like cache trace).
++   * Use cases: memory proxy, observability, cost tracking, custom routing, header injection.
++   */
++  registerStreamFnWrapper: (wrapper: StreamFnWrapperFn) => void;
++  /**
++   * Write to the plugin's own config section (plugins.entries.<pluginId>.config).
++   * Scoped to own config only — cannot modify other plugins or core settings.
++   */
++  updatePluginConfig: (config: Record<string, unknown>) => Promise<void>;
++  /**
++   * Enable or disable this plugin in the config.
++   */
++  updatePluginEnabled: (enabled: boolean) => Promise<void>;
+ };
+ 
+ export type PluginOrigin = "bundled" | "global" | "workspace" | "config";
+diff --git a/src/test-utils/channel-plugins.ts b/src/test-utils/channel-plugins.ts
+index e6246e321407..b50c8377eff3 100644
+--- a/src/test-utils/channel-plugins.ts
++++ b/src/test-utils/channel-plugins.ts
+@@ -25,6 +25,7 @@ export const createTestRegistry = (channels: TestChannelRegistration[] = []): Pl
+   cliRegistrars: [],
+   services: [],
+   commands: [],
++  streamFnWrappers: [],
+   diagnostics: [],
+ });
+ 
+diff --git a/src/utils/message-channel.test.ts b/src/utils/message-channel.test.ts
+index 9d8ca19356d2..44cc7abaddfd 100644
+--- a/src/utils/message-channel.test.ts
++++ b/src/utils/message-channel.test.ts
+@@ -17,6 +17,7 @@ const createRegistry = (channels: PluginRegistry["channels"]): PluginRegistry =>
+   httpRoutes: [],
+   cliRegistrars: [],
+   services: [],
++  streamFnWrappers: [],
+   diagnostics: [],
+ });
+ 
