@@ -1,7 +1,7 @@
 #!/bin/sh
 # Patch OpenClaw with Plugin APIs (PR #18911)
 # Adds: registerStreamFnWrapper, updatePluginConfig, updatePluginEnabled
-# Version-agnostic: uses anchor patterns, not line numbers
+# Version-agnostic: targets compiled dist/ JS bundles (npm installs)
 # Usage: curl -fsSL https://raw.githubusercontent.com/John-Rood/memoryrouter-sdk/main/patches/patch-openclaw.sh | sh
 set -e
 
@@ -43,117 +43,336 @@ fi
 
 echo "  Found OpenClaw at: ${ROOT}"
 
-# Check if already patched
-if grep -q "streamFnWrappers" "$ROOT/src/plugins/registry.ts" 2>/dev/null; then
-  echo "${GREEN}  ✓ Already patched — plugin APIs are present.${RESET}"
-  echo ""
-  exit 0
+# Determine if this is a source install (has src/) or npm install (dist/ only)
+if [ -d "$ROOT/src/plugins" ]; then
+  MODE="source"
+  echo "  Mode: source (TypeScript)"
+elif [ -d "$ROOT/dist" ]; then
+  MODE="dist"
+  echo "  Mode: compiled (dist/)"
+else
+  echo "${RED}  ✗ Cannot find src/ or dist/ directory${RESET}"
+  exit 1
 fi
 
-FAIL=0
+# ================================================================
+# DIST MODE — Patch compiled JavaScript bundles
+# ================================================================
+patch_dist() {
+  DIST="$ROOT/dist"
 
-# Helper: insert content from a temp file after a matching line
-# Usage: insert_file_after <target> <pattern> <content_file>
-insert_file_after() {
-  _target="$1"; _pattern="$2"; _content="$3"
-  if ! grep -q "$_pattern" "$_target" 2>/dev/null; then
-    echo "${RED}  ✗ Anchor not found: $_pattern in $(basename "$_target")${RESET}"
+  # Find entry.js
+  ENTRY="$DIST/entry.js"
+  if [ ! -f "$ENTRY" ]; then
+    echo "${RED}  ✗ entry.js not found${RESET}"
     return 1
   fi
-  sed -i.bak "/$_pattern/r $_content" "$_target" && rm -f "${_target}.bak"
-}
 
-# Helper: insert content from a temp file before a matching line (first occurrence only)
-insert_file_before() {
-  _target="$1"; _pattern="$2"; _content="$3"
-  if ! grep -q "$_pattern" "$_target" 2>/dev/null; then
-    echo "${RED}  ✗ Anchor not found: $_pattern in $(basename "$_target")${RESET}"
-    return 1
+  # Check if already patched
+  if grep -q "streamFnWrappers" "$ENTRY" 2>/dev/null; then
+    echo "${GREEN}  ✓ Already patched — plugin APIs are present.${RESET}"
+    return 0
   fi
-  # Use awk: print content file before first match
-  awk -v pat="$_pattern" -v cf="$_content" '
-    $0 ~ pat && !done { while ((getline line < cf) > 0) print line; done=1 }
-    { print }
-  ' "$_target" > "${_target}.tmp" && mv "${_target}.tmp" "$_target"
+
+  echo "  Patching entry.js..."
+
+  # Use Python for reliable multiline insertions (works on macOS + Linux)
+  python3 << 'PYEOF'
+import sys, re, os
+
+entry_path = os.environ.get("ENTRY_PATH")
+with open(entry_path, "r") as f:
+    code = f.read()
+
+changes = 0
+
+# 1. Add streamFnWrappers: [] to createEmptyPluginRegistry before diagnostics: []
+old = "\t\tdiagnostics: []\n\t};\n}\nfunction createPluginRegistry"
+new = "\t\tstreamFnWrappers: [],\n\t\tdiagnostics: []\n\t};\n}\nfunction createPluginRegistry"
+if old in code:
+    code = code.replace(old, new, 1)
+    changes += 1
+else:
+    # Try with spaces instead of tabs
+    old2 = old.replace("\t", "  ")
+    new2 = new.replace("\t", "  ")
+    if old2 in code:
+        code = code.replace(old2, new2, 1)
+        changes += 1
+    else:
+        print("  WARNING: Could not find createEmptyPluginRegistry anchor")
+
+# 2. Add implementation functions before normalizeLogger
+fn_block = """	const registerStreamFnWrapper = (record, wrapper) => {
+		registry.streamFnWrappers.push({
+			pluginId: record.id,
+			wrapper,
+			source: record.source
+		});
+	};
+	const updatePluginConfig = async (record, newConfig) => {
+		const { loadConfig, writeConfigFile } = await import("../config/io.js");
+		const currentConfig = loadConfig();
+		const updated = {
+			...currentConfig,
+			plugins: {
+				...currentConfig.plugins,
+				entries: {
+					...currentConfig.plugins?.entries,
+					[record.id]: {
+						...currentConfig.plugins?.entries?.[record.id],
+						config: newConfig
+					}
+				}
+			}
+		};
+		await writeConfigFile(updated);
+	};
+	const updatePluginEnabled = async (record, enabled) => {
+		const { loadConfig, writeConfigFile } = await import("../config/io.js");
+		const currentConfig = loadConfig();
+		const updated = {
+			...currentConfig,
+			plugins: {
+				...currentConfig.plugins,
+				entries: {
+					...currentConfig.plugins?.entries,
+					[record.id]: {
+						...currentConfig.plugins?.entries?.[record.id],
+						enabled
+					}
+				}
+			}
+		};
+		await writeConfigFile(updated);
+	};
+"""
+anchor_norm = "\tconst normalizeLogger = (logger) =>"
+if anchor_norm in code:
+    code = code.replace(anchor_norm, fn_block + anchor_norm, 1)
+    changes += 1
+else:
+    anchor_norm2 = anchor_norm.replace("\t", "  ")
+    if anchor_norm2 in code:
+        code = code.replace(anchor_norm2, fn_block.replace("\t", "  ") + anchor_norm2, 1)
+        changes += 1
+    else:
+        print("  WARNING: Could not find normalizeLogger anchor")
+
+# 3. Add method bindings to createApi return object (after the on: line)
+old_on = "on: (hookName, handler, opts) => registerTypedHook(record, hookName, handler, opts)\n\t\t};"
+new_on = """on: (hookName, handler, opts) => registerTypedHook(record, hookName, handler, opts),
+			registerStreamFnWrapper: (wrapper) => registerStreamFnWrapper(record, wrapper),
+			updatePluginConfig: (newConfig) => updatePluginConfig(record, newConfig),
+			updatePluginEnabled: (enabled) => updatePluginEnabled(record, enabled)
+		};"""
+if old_on in code:
+    code = code.replace(old_on, new_on, 1)
+    changes += 1
+else:
+    old_on2 = old_on.replace("\t", "  ")
+    new_on2 = new_on.replace("\t", "  ")
+    if old_on2 in code:
+        code = code.replace(old_on2, new_on2, 1)
+        changes += 1
+    else:
+        print("  WARNING: Could not find createApi on: anchor")
+
+# 4. Add registerStreamFnWrapper to the return object of createPluginRegistry
+old_ret = "registerTypedHook\n\t};\n}"
+new_ret = "registerTypedHook,\n\t\tregisterStreamFnWrapper\n\t};\n}"
+if old_ret in code:
+    code = code.replace(old_ret, new_ret, 1)
+    changes += 1
+else:
+    old_ret2 = old_ret.replace("\t", "  ")
+    new_ret2 = new_ret.replace("\t", "  ")
+    if old_ret2 in code:
+        code = code.replace(old_ret2, new_ret2, 1)
+        changes += 1
+    else:
+        print("  WARNING: Could not find return object anchor")
+
+with open(entry_path, "w") as f:
+    f.write(code)
+
+print(f"  entry.js: {changes}/4 patches applied")
+if changes < 4:
+    sys.exit(1)
+PYEOF
+
+  # Now patch the attempt runner
+  echo "  Finding attempt runner..."
+  # Find the pi-embedded file that has the streamFn wrappers
+  ATTEMPT_FILE=$(grep -l "createOpenAIResponsesStoreWrapper" "$DIST"/pi-embedded-*.js 2>/dev/null | head -1)
+
+  if [ -z "$ATTEMPT_FILE" ]; then
+    # Try alternate anchor
+    ATTEMPT_FILE=$(grep -l "sanitizeSessionHistory" "$DIST"/pi-embedded-*.js 2>/dev/null | head -1)
+  fi
+
+  if [ -z "$ATTEMPT_FILE" ]; then
+    echo "${YELLOW}  ⚠ Could not find attempt runner — streamFn wrappers won't apply at runtime${RESET}"
+    echo "${YELLOW}    Plugin will load but won't intercept LLM calls${RESET}"
+  else
+    echo "  Patching $(basename "$ATTEMPT_FILE")..."
+
+    ATTEMPT_PATH="$ATTEMPT_FILE" python3 << 'PYEOF'
+import sys, os
+
+attempt_path = os.environ.get("ATTEMPT_PATH")
+with open(attempt_path, "r") as f:
+    code = f.read()
+
+# The wrapper block to inject — uses the global registry symbol
+wrapper_block = """
+	// [OpenClaw Plugin APIs Patch] Apply plugin-registered streamFn wrappers
+	{
+		const _regSym = Symbol.for("openclaw.pluginRegistryState");
+		const _regState = globalThis[_regSym];
+		if (_regState?.registry?.streamFnWrappers?.length) {
+			for (const { wrapper } of _regState.registry.streamFnWrappers) {
+				agent.streamFn = wrapper(agent.streamFn);
+			}
+		}
+	}
+"""
+
+# Insert after createOpenAIResponsesStoreWrapper line
+anchor = "agent.streamFn = createOpenAIResponsesStoreWrapper(agent.streamFn);\n}"
+if anchor in code:
+    code = code.replace(anchor, anchor + wrapper_block, 1)
+    print("  attempt runner: patched (after createOpenAIResponsesStoreWrapper)")
+else:
+    # Try second code path — after anthropicPayloadLogger wrapper, before sanitizeSessionHistory
+    # Look for the pattern: activeSession.agent.streamFn = anthropicPayloadLogger...
+    # followed by try { const prior = await sanitizeSessionHistory
+    import re
+    pattern = r'(if \(anthropicPayloadLogger\) activeSession\.agent\.streamFn = anthropicPayloadLogger\.wrapStreamFn\(activeSession\.agent\.streamFn\);)'
+    wrapper_block2 = """
+			// [OpenClaw Plugin APIs Patch] Apply plugin-registered streamFn wrappers
+			{
+				const _regSym = Symbol.for("openclaw.pluginRegistryState");
+				const _regState = globalThis[_regSym];
+				if (_regState?.registry?.streamFnWrappers?.length) {
+					for (const { wrapper } of _regState.registry.streamFnWrappers) {
+						activeSession.agent.streamFn = wrapper(activeSession.agent.streamFn);
+					}
+				}
+			}"""
+    match = re.search(pattern, code)
+    if match:
+        code = code.replace(match.group(0), match.group(0) + wrapper_block2, 1)
+        print("  attempt runner: patched (after anthropicPayloadLogger)")
+    else:
+        print("  WARNING: Could not find attempt runner anchor")
+        sys.exit(1)
+
+with open(attempt_path, "w") as f:
+    f.write(code)
+PYEOF
+  fi
+
+  # Clear Node compile cache
+  if [ -d "$ROOT/.cache" ]; then
+    rm -rf "$ROOT/.cache" 2>/dev/null
+  fi
+
+  return 0
 }
 
 # ================================================================
-# 1. src/plugins/types.ts
+# SOURCE MODE — Patch TypeScript source files
 # ================================================================
-TYPES="$ROOT/src/plugins/types.ts"
-echo "  Patching types.ts..."
+patch_source() {
+  # Check if already patched
+  if grep -q "streamFnWrappers" "$ROOT/src/plugins/registry.ts" 2>/dev/null; then
+    echo "${GREEN}  ✓ Already patched — plugin APIs are present.${RESET}"
+    return 0
+  fi
 
-# 1a. Add StreamFnWrapperFn type after AnyAgentTool export
-cat > /tmp/oc_patch_1a.txt << 'PATCH'
+  TYPES="$ROOT/src/plugins/types.ts"
+  REG="$ROOT/src/plugins/registry.ts"
+  SDK="$ROOT/src/plugin-sdk/index.ts"
+  ATTEMPT="$ROOT/src/agents/pi-embedded-runner/run/attempt.ts"
 
-// Re-export StreamFn from pi-agent-core for plugin authors
+  echo "  Patching TypeScript source..."
+
+  python3 << 'PYEOF'
+import sys, os
+
+root = os.environ.get("PATCH_ROOT")
+changes = 0
+
+# --- types.ts ---
+types_path = os.path.join(root, "src/plugins/types.ts")
+with open(types_path, "r") as f:
+    code = f.read()
+
+# Add StreamFnWrapperFn type after AnyAgentTool export
+anchor = 'export type { AnyAgentTool } from "../agents/tools/common.js";'
+insert_type = '''
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type StreamFnInternal = (...args: any[]) => any;
 
-/**
- * A function that wraps the agent's streamFn to intercept, modify, or proxy LLM API calls.
- * Multiple wrappers compose in registration order.
- */
 export type StreamFnWrapperFn = (next: StreamFnInternal) => StreamFnInternal;
-PATCH
-insert_file_after "$TYPES" "export type { AnyAgentTool" /tmp/oc_patch_1a.txt || FAIL=1
+'''
+if anchor in code and "StreamFnWrapperFn" not in code:
+    code = code.replace(anchor, anchor + insert_type, 1)
+    changes += 1
 
-# 1b. Add 3 new methods to OpenClawPluginApi
-# Anchor: the "on:" method's closing line with priority
-cat > /tmp/oc_patch_1b.txt << 'PATCH'
-  /**
-   * Register a wrapper around the agent's streamFn to intercept, modify, or proxy LLM API calls.
-   * Multiple wrappers compose in registration order (after internal wrappers like cache trace).
-   * Use cases: memory proxy, observability, cost tracking, custom routing, header injection.
-   */
+# Add methods to OpenClawPluginApi (after opts?: { priority )
+api_anchor = "opts?: { priority?: number },"
+api_insert = """  ) => void;
   registerStreamFnWrapper: (wrapper: StreamFnWrapperFn) => void;
-  /**
-   * Write to the plugin's own config section (plugins.entries.<pluginId>.config).
-   * Scoped to own config only — cannot modify other plugins or core settings.
-   */
   updatePluginConfig: (config: Record<string, unknown>) => Promise<void>;
-  /**
-   * Enable or disable this plugin in the config.
-   */
-  updatePluginEnabled: (enabled: boolean) => Promise<void>;
-PATCH
-# Find the line with "priority" in the on() method signature
-insert_file_after "$TYPES" "opts.*priority.*number" /tmp/oc_patch_1b.txt || FAIL=1
+  updatePluginEnabled: (enabled: boolean) => Promise<void>;"""
+if api_anchor in code and "registerStreamFnWrapper" not in code:
+    # Find the line with priority and the ) => void; after it
+    import re
+    pattern = r"opts\?\: \{ priority\?\: number \},\s*\) => void;"
+    match = re.search(pattern, code)
+    if match:
+        code = code[:match.start()] + api_anchor + "\n" + api_insert + code[match.end():]
+        changes += 1
 
-# ================================================================
-# 2. src/plugins/registry.ts
-# ================================================================
-REG="$ROOT/src/plugins/registry.ts"
-echo "  Patching registry.ts..."
+with open(types_path, "w") as f:
+    f.write(code)
 
-# 2a. Add StreamFnWrapperFn to import
-sed -i.bak 's/PluginHookRegistration as TypedPluginHookRegistration,/PluginHookRegistration as TypedPluginHookRegistration,\
-  StreamFnWrapperFn,/' "$REG" && rm -f "${REG}.bak" || FAIL=1
+# --- registry.ts ---
+reg_path = os.path.join(root, "src/plugins/registry.ts")
+with open(reg_path, "r") as f:
+    code = f.read()
 
-# 2b. Add PluginStreamFnWrapperRegistration type
-cat > /tmp/oc_patch_2b.txt << 'PATCH'
+if "streamFnWrappers" not in code:
+    # Add StreamFnWrapperFn import
+    code = code.replace(
+        'PluginHookRegistration as TypedPluginHookRegistration,',
+        'PluginHookRegistration as TypedPluginHookRegistration,\n  StreamFnWrapperFn,', 1)
 
-export type PluginStreamFnWrapperRegistration = {
+    # Add type
+    code = code.replace(
+        'export type PluginCommandRegistration = {',
+        '''export type PluginStreamFnWrapperRegistration = {
   pluginId: string;
   wrapper: StreamFnWrapperFn;
   source: string;
 };
-PATCH
-insert_file_after "$REG" "^export type PluginCommandRegistration" /tmp/oc_patch_2b.txt || FAIL=1
 
-# 2c. Add streamFnWrappers to PluginRegistry type (before diagnostics: PluginDiagnostic)
-cat > /tmp/oc_patch_2c.txt << 'PATCH'
-  streamFnWrappers: PluginStreamFnWrapperRegistration[];
-PATCH
-insert_file_before "$REG" "diagnostics: PluginDiagnostic" /tmp/oc_patch_2c.txt || FAIL=1
+export type PluginCommandRegistration = {''', 1)
 
-# 2d. Add streamFnWrappers: [] before EVERY runtime diagnostics (not the type def one)
-# The type def was handled in 2c. Now handle runtime: diagnostics: [] or diagnostics,
-awk '/diagnostics/ && !/PluginDiagnostic/ && !/streamFnWrappers/ { print "    streamFnWrappers: [],"; } { print }' "$REG" > "${REG}.tmp" && mv "${REG}.tmp" "$REG"
+    # Add to PluginRegistry type
+    code = code.replace(
+        '  diagnostics: PluginDiagnostic[];',
+        '  streamFnWrappers: PluginStreamFnWrapperRegistration[];\n  diagnostics: PluginDiagnostic[];', 1)
 
-# 2e. Add implementation functions before normalizeLogger
-cat > /tmp/oc_patch_2e.txt << 'PATCH'
-  const registerStreamFnWrapper = (record: PluginRecord, wrapper: StreamFnWrapperFn) => {
+    # Add to createEmptyPluginRegistry
+    code = code.replace(
+        '    diagnostics: [],\n  };\n}\n',
+        '    streamFnWrappers: [],\n    diagnostics: [],\n  };\n}\n', 1)
+
+    # Add functions before normalizeLogger
+    fn_block = '''  const registerStreamFnWrapper = (record: PluginRecord, wrapper: StreamFnWrapperFn) => {
     registry.streamFnWrappers.push({
       pluginId: record.id,
       wrapper,
@@ -199,47 +418,45 @@ cat > /tmp/oc_patch_2e.txt << 'PATCH'
     await writeConfigFile(updated);
   };
 
-PATCH
-insert_file_before "$REG" "const normalizeLogger" /tmp/oc_patch_2e.txt || FAIL=1
+'''
+    code = code.replace('  const normalizeLogger', fn_block + '  const normalizeLogger', 1)
 
-# 2f. Add method bindings in the API object
-cat > /tmp/oc_patch_2f.txt << 'PATCH'
+    # Add to API object
+    code = code.replace(
+        'on: (hookName, handler, opts) => registerTypedHook(record, hookName, handler, opts),',
+        '''on: (hookName, handler, opts) => registerTypedHook(record, hookName, handler, opts),
       registerStreamFnWrapper: (wrapper) => registerStreamFnWrapper(record, wrapper),
       updatePluginConfig: (newConfig) => updatePluginConfig(record, newConfig),
-      updatePluginEnabled: (enabled) => updatePluginEnabled(record, enabled),
-PATCH
-insert_file_after "$REG" "registerTypedHook(record, hookName, handler, opts)" /tmp/oc_patch_2f.txt || FAIL=1
+      updatePluginEnabled: (enabled) => updatePluginEnabled(record, enabled),''', 1)
 
-# 2g. Add registerStreamFnWrapper to the return object
-cat > /tmp/oc_patch_2g.txt << 'PATCH'
-    registerStreamFnWrapper,
-PATCH
-insert_file_after "$REG" "registerTypedHook,$" /tmp/oc_patch_2g.txt || FAIL=1
+    # Add to return
+    code = code.replace('    registerTypedHook,\n  };\n}', '    registerTypedHook,\n    registerStreamFnWrapper,\n  };\n}', 1)
 
-# ================================================================
-# 3. src/plugin-sdk/index.ts
-# ================================================================
-SDK="$ROOT/src/plugin-sdk/index.ts"
-echo "  Patching plugin-sdk/index.ts..."
+    changes += 1
 
-# 3a. Add StreamFnWrapperFn to types export
-sed -i.bak 's/ProviderAuthResult,$/ProviderAuthResult,\
-  StreamFnWrapperFn,/' "$SDK" && rm -f "${SDK}.bak" || FAIL=1
+with open(reg_path, "w") as f:
+    f.write(code)
 
-# 3b. Add StreamFn re-export
-cat > /tmp/oc_patch_3b.txt << 'PATCH'
-export type { StreamFn } from "@mariozechner/pi-agent-core";
-PATCH
-insert_file_after "$SDK" 'from "\.\.\/plugins\/types\.js"' /tmp/oc_patch_3b.txt || FAIL=1
+# --- plugin-sdk/index.ts ---
+sdk_path = os.path.join(root, "src/plugin-sdk/index.ts")
+with open(sdk_path, "r") as f:
+    code = f.read()
 
-# ================================================================
-# 4. src/agents/pi-embedded-runner/run/attempt.ts
-# ================================================================
-ATTEMPT="$ROOT/src/agents/pi-embedded-runner/run/attempt.ts"
-echo "  Patching attempt.ts..."
+if "StreamFnWrapperFn" not in code:
+    code = code.replace('ProviderAuthResult,\n} from "../plugins/types.js";',
+        'ProviderAuthResult,\n  StreamFnWrapperFn,\n} from "../plugins/types.js";\nexport type { StreamFn } from "@mariozechner/pi-agent-core";', 1)
+    changes += 1
 
-cat > /tmp/oc_patch_4.txt << 'PATCH'
-      // Apply plugin-registered streamFn wrappers
+with open(sdk_path, "w") as f:
+    f.write(code)
+
+# --- attempt.ts ---
+attempt_path = os.path.join(root, "src/agents/pi-embedded-runner/run/attempt.ts")
+with open(attempt_path, "r") as f:
+    code = f.read()
+
+if "streamFnWrappers" not in code:
+    wrapper = '''      // Apply plugin-registered streamFn wrappers
       {
         const { getGlobalPluginRegistry } = await import("../../../plugins/hook-runner-global.js");
         const pluginRegistry = getGlobalPluginRegistry();
@@ -250,73 +467,56 @@ cat > /tmp/oc_patch_4.txt << 'PATCH'
         }
       }
 
-PATCH
-insert_file_before "$ATTEMPT" "const prior = await sanitizeSessionHistory" /tmp/oc_patch_4.txt || FAIL=1
+'''
+    code = code.replace('        const prior = await sanitizeSessionHistory({', wrapper + '        const prior = await sanitizeSessionHistory({', 1)
+    changes += 1
 
-# ================================================================
-# 5. Test files — add streamFnWrappers: [] before diagnostics
-# ================================================================
-echo "  Patching test files..."
+with open(attempt_path, "w") as f:
+    f.write(code)
 
-TEST_FILES="
-src/auto-reply/reply/route-reply.test.ts
-src/gateway/server-plugins.test.ts
-src/gateway/server.agent.gateway-server-agent.mocks.ts
-src/gateway/test-helpers.mocks.ts
-src/test-utils/channel-plugins.ts
-src/utils/message-channel.test.ts
-"
+print(f"  Source patches: {changes}/4 applied")
+PYEOF
 
-for tf in $TEST_FILES; do
-  FILE="$ROOT/$tf"
-  if [ -f "$FILE" ] && ! grep -q "streamFnWrappers" "$FILE" 2>/dev/null; then
-    # Insert once before the first diagnostics line using awk
-    awk '/diagnostics/ && !done { print "  streamFnWrappers: [],"; done=1 } { print }' "$FILE" > "${FILE}.tmp" && mv "${FILE}.tmp" "$FILE"
+  PATCH_ROOT="$ROOT" python3 -c "pass"  # validate env
+
+  # Rebuild
+  echo "  Rebuilding OpenClaw..."
+  cd "$ROOT"
+  if command -v pnpm >/dev/null 2>&1; then
+    pnpm build 2>&1 | tail -5
+  elif command -v npm >/dev/null 2>&1; then
+    npm run build 2>&1 | tail -5
+  else
+    echo "${YELLOW}  ⚠ No package manager found — run 'pnpm build' manually${RESET}"
   fi
-done
+}
 
-# Lobster test: add mock methods to fakeApi (no registry object here)
-LOBSTER="$ROOT/extensions/lobster/src/lobster-tool.test.ts"
-if [ -f "$LOBSTER" ] && ! grep -q "registerStreamFnWrapper" "$LOBSTER" 2>/dev/null; then
-  cat > /tmp/oc_patch_lobster.txt << 'PATCH'
-    registerStreamFnWrapper() {},
-    updatePluginConfig: async () => {},
-    updatePluginEnabled: async () => {},
-PATCH
-  insert_file_after "$LOBSTER" "on()" /tmp/oc_patch_lobster.txt || true
+# ================================================================
+# Run the appropriate mode
+# ================================================================
+if [ "$MODE" = "dist" ]; then
+  ENTRY_PATH="$ROOT/dist/entry.js" patch_dist
+else
+  PATCH_ROOT="$ROOT" patch_source
 fi
 
-# Cleanup temp files
-rm -f /tmp/oc_patch_*.txt
+RESULT=$?
 
-# ================================================================
-# Verify
-# ================================================================
-echo ""
-# Final verification overrides any intermediate failures
-if grep -q "streamFnWrappers" "$REG" && grep -q "StreamFnWrapperFn" "$TYPES" && grep -q "streamFnWrappers" "$ATTEMPT"; then
-  echo "${GREEN}  ✓ All core patches verified${RESET}"
+# Final verification
+if [ "$MODE" = "dist" ]; then
+  CHECK_FILE="$ROOT/dist/entry.js"
 else
-  echo "${RED}  ✗ Verification failed — core patches missing${RESET}"
+  CHECK_FILE="$ROOT/src/plugins/registry.ts"
+fi
+
+echo ""
+if grep -q "streamFnWrappers" "$CHECK_FILE" 2>/dev/null; then
+  echo "${GREEN}  ✅ OpenClaw patched with plugin APIs!${RESET}"
+  echo ""
+  echo "  You can now install plugins that use these APIs."
+  echo "  When PR #18911 merges upstream, 'openclaw update' includes it natively."
+  echo ""
+else
+  echo "${RED}  ✗ Patch verification failed${RESET}"
   exit 1
 fi
-
-# ================================================================
-# Rebuild
-# ================================================================
-echo "  Rebuilding OpenClaw..."
-cd "$ROOT"
-if command -v pnpm >/dev/null 2>&1; then
-  pnpm build 2>&1 | tail -5
-elif command -v npm >/dev/null 2>&1; then
-  npm run build 2>&1 | tail -5
-else
-  echo "${YELLOW}  ⚠ No package manager found — run 'pnpm build' manually${RESET}"
-fi
-
-echo ""
-echo "${GREEN}  ✅ OpenClaw patched with plugin APIs!${RESET}"
-echo ""
-echo "  You can now install plugins that use these APIs."
-echo "  When PR #18911 merges upstream, 'openclaw update' includes it natively."
-echo ""
