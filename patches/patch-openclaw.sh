@@ -141,10 +141,11 @@ patch_dist() {
     return 1
   fi
 
-  # Check if already patched (both entry.js AND attempt runner must have the patch)
+  # Check if already patched (entry.js + registry chunks + attempt runner must all have the patch)
   ATTEMPT_FILE=$(grep -l "streamFnWrappers.*attempt runner" "$DIST"/pi-embedded-*.js 2>/dev/null | head -1)
-  if grep -q "streamFnWrappers" "$ENTRY" 2>/dev/null && [ -n "$ATTEMPT_FILE" ]; then
-    echo "${GREEN}  ✓ Already patched — plugin APIs are present (both locations).${RESET}"
+  REGISTRY_PATCHED=$(grep -l "streamFnWrappers" "$DIST"/registry-*.js 2>/dev/null | head -1)
+  if grep -q "streamFnWrappers" "$ENTRY" 2>/dev/null && [ -n "$ATTEMPT_FILE" ] && [ -n "$REGISTRY_PATCHED" ]; then
+    echo "${GREEN}  ✓ Already patched — plugin APIs are present (entry + registry + attempt runner).${RESET}"
     return 0
   fi
 
@@ -264,6 +265,103 @@ print(f"  entry.js: {changes}/4 patches applied")
 if changes < 4:
     sys.exit(1)
 PYEOF
+
+  # ================================================================
+  # Patch gateway registry chunks (registry-*.js)
+  # The gateway loads from index.js → registry-*.js, NOT entry.js.
+  # entry.js is only used by CLI commands (openclaw mr, openclaw plugins).
+  # Without patching registry chunks, the gateway's createApi won't have
+  # registerStreamFnWrapper and plugins will fail to register.
+  # ================================================================
+  echo "  Finding gateway registry chunks..."
+  REGISTRY_FILES=$(grep -l "on:.*registerTypedHook" "$DIST"/registry-*.js 2>/dev/null | sort -u)
+  # Also check gateway-cli chunks which may have their own registry copy
+  GATEWAY_CLI_FILES=$(grep -l "on:.*registerTypedHook" "$DIST"/gateway-cli-*.js 2>/dev/null | sort -u)
+  ALL_REGISTRY_FILES="$REGISTRY_FILES $GATEWAY_CLI_FILES"
+
+  for REG_FILE in $ALL_REGISTRY_FILES; do
+    [ -z "$REG_FILE" ] && continue
+    if grep -q "streamFnWrappers" "$REG_FILE" 2>/dev/null; then
+      echo "  $(basename "$REG_FILE"): already patched ✓"
+      continue
+    fi
+    echo "  Patching $(basename "$REG_FILE")..."
+
+    REG_PATH="$REG_FILE" python3 << 'PYEOF'
+import sys, os
+
+reg_path = os.environ.get("REG_PATH")
+with open(reg_path, "r") as f:
+    code = f.read()
+
+changes = 0
+
+# 1. Add streamFnWrappers: [] to createEmptyPluginRegistry
+old1 = "\t\tdiagnostics: []\n\t};\n}\nfunction createPluginRegistry"
+new1 = "\t\tstreamFnWrappers: [],\n\t\tdiagnostics: []\n\t};\n}\nfunction createPluginRegistry"
+if old1 in code:
+    code = code.replace(old1, new1, 1)
+    changes += 1
+
+# 2. Add functions before normalizeLogger
+fn_block = """\tconst registerStreamFnWrapper = (record, wrapper) => {
+\t\tregistry.streamFnWrappers.push({
+\t\t\tpluginId: record.id,
+\t\t\twrapper,
+\t\t\tsource: record.source
+\t\t});
+\t};
+\tconst _readWriteConfig = async (mutate) => {
+\t\tconst fs$1 = await import("node:fs");
+\t\tconst path$1 = await import("node:path");
+\t\tconst cfgPath = resolveConfigPath();
+\t\tlet current = {};
+\t\ttry { current = JSON.parse(fs$1.readFileSync(cfgPath, "utf-8")); } catch {}
+\t\tmutate(current);
+\t\tfs$1.mkdirSync(path$1.dirname(cfgPath), { recursive: true });
+\t\tfs$1.writeFileSync(cfgPath, JSON.stringify(current, null, 2) + "\\n");
+\t};
+\tconst updatePluginConfig = async (record, newConfig) => {
+\t\tawait _readWriteConfig((cfg) => {
+\t\t\tif (!cfg.plugins) cfg.plugins = {};
+\t\t\tif (!cfg.plugins.entries) cfg.plugins.entries = {};
+\t\t\tif (!cfg.plugins.entries[record.id]) cfg.plugins.entries[record.id] = {};
+\t\t\tcfg.plugins.entries[record.id].config = newConfig;
+\t\t});
+\t};
+\tconst updatePluginEnabled = async (record, enabled) => {
+\t\tawait _readWriteConfig((cfg) => {
+\t\t\tif (!cfg.plugins) cfg.plugins = {};
+\t\t\tif (!cfg.plugins.entries) cfg.plugins.entries = {};
+\t\t\tif (!cfg.plugins.entries[record.id]) cfg.plugins.entries[record.id] = {};
+\t\t\tcfg.plugins.entries[record.id].enabled = enabled;
+\t\t});
+\t};
+"""
+anchor = "\tconst normalizeLogger = (logger) =>"
+if anchor in code:
+    code = code.replace(anchor, fn_block + anchor, 1)
+    changes += 1
+
+# 3. Add to createApi return object
+old3 = "on: (hookName, handler, opts) => registerTypedHook(record, hookName, handler, opts)\n\t\t};"
+new3 = """on: (hookName, handler, opts) => registerTypedHook(record, hookName, handler, opts),
+\t\t\tregisterStreamFnWrapper: (wrapper) => registerStreamFnWrapper(record, wrapper),
+\t\t\tupdatePluginConfig: (newConfig) => updatePluginConfig(record, newConfig),
+\t\t\tupdatePluginEnabled: (enabled) => updatePluginEnabled(record, enabled)
+\t\t};"""
+if old3 in code:
+    code = code.replace(old3, new3, 1)
+    changes += 1
+
+with open(reg_path, "w") as f:
+    f.write(code)
+
+print(f"    {changes}/3 patches applied")
+if changes < 3:
+    sys.exit(1)
+PYEOF
+  done
 
   # Now patch ALL attempt runner files (there can be multiple pi-embedded-*.js)
   echo "  Finding attempt runner(s)..."
