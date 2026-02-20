@@ -2,7 +2,7 @@
 
 **Persistent memory for any AI model.** One API that adds long-term memory to ChatGPT, Claude, Gemini, Grok, and 90+ other models.
 
-🌐 [Homepage](https://memoryrouter.ai) · 📚 [Documentation](https://docs.memoryrouter.ai) · 🎮 [Dashboard](https://memoryrouter.ai/dashboard)
+🌐 [Homepage](https://memoryrouter.ai) · 📚 [Documentation](https://docs.memoryrouter.ai) · 🎮 [Dashboard](https://app.memoryrouter.ai/)
 
 ---
 
