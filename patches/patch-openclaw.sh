@@ -111,17 +111,18 @@ fn_block = """	const registerStreamFnWrapper = (record, wrapper) => {
 			source: record.source
 		});
 	};
-	const _readWriteConfig = (mutate) => {
+	const _readWriteConfig = async (mutate) => {
 		const cfgPath = resolveConfigPath();
-		const fs$1 = require("node:fs");
+		const fs$1 = await import("node:fs");
+		const path$1 = await import("node:path");
 		let current = {};
 		try { current = JSON.parse(fs$1.readFileSync(cfgPath, "utf-8")); } catch {}
 		mutate(current);
-		fs$1.mkdirSync(require("node:path").dirname(cfgPath), { recursive: true });
+		fs$1.mkdirSync(path$1.dirname(cfgPath), { recursive: true });
 		fs$1.writeFileSync(cfgPath, JSON.stringify(current, null, 2) + "\\n");
 	};
 	const updatePluginConfig = async (record, newConfig) => {
-		_readWriteConfig((cfg) => {
+		await _readWriteConfig((cfg) => {
 			if (!cfg.plugins) cfg.plugins = {};
 			if (!cfg.plugins.entries) cfg.plugins.entries = {};
 			if (!cfg.plugins.entries[record.id]) cfg.plugins.entries[record.id] = {};
@@ -129,7 +130,7 @@ fn_block = """	const registerStreamFnWrapper = (record, wrapper) => {
 		});
 	};
 	const updatePluginEnabled = async (record, enabled) => {
-		_readWriteConfig((cfg) => {
+		await _readWriteConfig((cfg) => {
 			if (!cfg.plugins) cfg.plugins = {};
 			if (!cfg.plugins.entries) cfg.plugins.entries = {};
 			if (!cfg.plugins.entries[record.id]) cfg.plugins.entries[record.id] = {};
