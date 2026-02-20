@@ -19,19 +19,92 @@ echo ""
 
 # Find OpenClaw install
 ROOT=""
+
+is_openclaw_root() {
+  [ -n "$1" ] && [ -f "$1/package.json" ] && { [ -d "$1/dist" ] || [ -d "$1/src/plugins" ]; }
+}
+
+resolve_dir() {
+  # Best-effort path normalization that works in sh across macOS/Linux/Git Bash.
+  if [ -d "$1" ]; then
+    (cd "$1" 2>/dev/null && pwd) || echo "$1"
+  else
+    echo "$1"
+  fi
+}
+
+try_root() {
+  CANDIDATE="$1"
+  if is_openclaw_root "$CANDIDATE"; then
+    ROOT=$(resolve_dir "$CANDIDATE")
+    return 0
+  fi
+  return 1
+}
+
 if [ -n "$OPENCLAW_ROOT" ]; then
-  ROOT="$OPENCLAW_ROOT"
-elif [ -d "$HOME/.openclaw/install" ] && [ -f "$HOME/.openclaw/install/package.json" ]; then
-  ROOT="$HOME/.openclaw/install"
-elif command -v openclaw >/dev/null 2>&1; then
+  try_root "$OPENCLAW_ROOT" || true
+fi
+
+if [ -z "$ROOT" ] && [ -d "$HOME/.openclaw/install" ] && [ -f "$HOME/.openclaw/install/package.json" ]; then
+  try_root "$HOME/.openclaw/install" || true
+fi
+
+if [ -z "$ROOT" ]; then
+  # npm global roots (works for npm installs across macOS/Linux/Windows Git Bash)
+  for NPM_CMD in npm /opt/homebrew/bin/npm /usr/local/bin/npm npm.cmd; do
+    if command -v "$NPM_CMD" >/dev/null 2>&1; then
+      NPM_ROOT=$($NPM_CMD root -g 2>/dev/null | tr -d '\r')
+      if [ -n "$NPM_ROOT" ]; then
+        try_root "$NPM_ROOT/openclaw" && break
+      fi
+    fi
+  done
+fi
+
+if [ -z "$ROOT" ] && command -v openclaw >/dev/null 2>&1; then
   OPENCLAW_BIN=$(command -v openclaw)
+
+  # Resolve symlink target when available.
   if [ -L "$OPENCLAW_BIN" ]; then
-    OPENCLAW_BIN=$(readlink -f "$OPENCLAW_BIN" 2>/dev/null || readlink "$OPENCLAW_BIN")
+    OPENCLAW_BIN=$(readlink -f "$OPENCLAW_BIN" 2>/dev/null || readlink "$OPENCLAW_BIN" 2>/dev/null || echo "$OPENCLAW_BIN")
   fi
-  CANDIDATE=$(dirname "$(dirname "$OPENCLAW_BIN")")
-  if [ -f "$CANDIDATE/package.json" ]; then
-    ROOT="$CANDIDATE"
+
+  BIN_DIR=$(dirname "$OPENCLAW_BIN")
+
+  # Common layouts:
+  # - /opt/homebrew/bin/openclaw -> /opt/homebrew/lib/node_modules/openclaw/...
+  # - %APPDATA%/npm/openclaw(.cmd) -> %APPDATA%/npm/node_modules/openclaw
+  # - direct /.../node_modules/openclaw/dist/entry.js
+  try_root "$(resolve_dir "$BIN_DIR/../lib/node_modules/openclaw")" || true
+  if [ -z "$ROOT" ]; then
+    try_root "$(resolve_dir "$BIN_DIR/../node_modules/openclaw")" || true
   fi
+  if [ -z "$ROOT" ]; then
+    try_root "$(resolve_dir "$(dirname "$(dirname "$OPENCLAW_BIN")")")" || true
+  fi
+fi
+
+if [ -z "$ROOT" ] && command -v openclaw.cmd >/dev/null 2>&1; then
+  OPENCLAW_CMD_BIN=$(command -v openclaw.cmd)
+  CMD_BIN_DIR=$(dirname "$OPENCLAW_CMD_BIN")
+  try_root "$(resolve_dir "$CMD_BIN_DIR/../node_modules/openclaw")" || true
+  if [ -z "$ROOT" ]; then
+    try_root "$(resolve_dir "$CMD_BIN_DIR/../lib/node_modules/openclaw")" || true
+  fi
+fi
+
+if [ -z "$ROOT" ]; then
+  # Fixed-path fallbacks for common package manager install locations.
+  for CAND in \
+    /opt/homebrew/lib/node_modules/openclaw \
+    /usr/local/lib/node_modules/openclaw \
+    "$HOME/.npm-global/lib/node_modules/openclaw" \
+    "$HOME/AppData/Roaming/npm/node_modules/openclaw" \
+    "$APPDATA/npm/node_modules/openclaw"
+  do
+    try_root "$CAND" && break
+  done
 fi
 
 if [ -z "$ROOT" ] || [ ! -f "$ROOT/package.json" ]; then
