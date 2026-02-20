@@ -513,6 +513,70 @@ echo ""
 if grep -q "streamFnWrappers" "$CHECK_FILE" 2>/dev/null; then
   echo "${GREEN}  ✅ OpenClaw patched with plugin APIs!${RESET}"
   echo ""
+
+  # ================================================================
+  # Bust Node compile cache (critical for dist patches)
+  # Node caches compiled bytecode and will silently serve the
+  # pre-patch version even though the JS files changed on disk.
+  # ================================================================
+  if [ "$MODE" = "dist" ]; then
+    echo "  Clearing Node compile cache..."
+
+    # 1. Touch patched files to invalidate mtime-based caches
+    touch "$ROOT/dist/entry.js" 2>/dev/null
+    ATTEMPT_FILE=$(grep -l "streamFnWrappers" "$ROOT"/dist/pi-embedded-*.js 2>/dev/null | head -1)
+    if [ -n "$ATTEMPT_FILE" ]; then
+      touch "$ATTEMPT_FILE" 2>/dev/null
+    fi
+
+    # 2. Clear Node's V8 compile cache directories
+    rm -rf "$HOME/.cache/node" 2>/dev/null
+    rm -rf "$ROOT/.cache" 2>/dev/null
+    rm -rf /tmp/node-compile-cache* 2>/dev/null
+
+    # 3. Inject NODE_DISABLE_COMPILE_CACHE into LaunchAgent plist if present
+    PLIST="$HOME/Library/LaunchAgents/ai.openclaw.gateway.plist"
+    if [ -f "$PLIST" ]; then
+      if ! grep -q "NODE_DISABLE_COMPILE_CACHE" "$PLIST" 2>/dev/null; then
+        # Insert before the closing </dict> of EnvironmentVariables
+        python3 -c "
+import re
+with open('$PLIST', 'r') as f:
+    content = f.read()
+inject = '    <key>NODE_DISABLE_COMPILE_CACHE</key>\n    <string>1</string>\n'
+# Find the last </dict> inside EnvironmentVariables (before the outer closing </dict>)
+# Insert before OPENCLAW_SERVICE_KIND or before the inner closing </dict>
+anchor = '    <key>OPENCLAW_SERVICE_KIND</key>'
+if anchor in content:
+    content = content.replace(anchor, inject + anchor, 1)
+else:
+    # Fallback: insert before the second-to-last </dict>
+    idx = content.rfind('</dict>', 0, content.rfind('</dict>'))
+    if idx > 0:
+        content = content[:idx] + inject + content[idx:]
+with open('$PLIST', 'w') as f:
+    f.write(content)
+print('    Updated LaunchAgent plist')
+" 2>/dev/null
+      fi
+    fi
+
+    # 4. Also handle systemd (Linux)
+    SYSTEMD_UNIT="/etc/systemd/system/openclaw-gateway.service"
+    if [ -f "$SYSTEMD_UNIT" ]; then
+      if ! grep -q "NODE_DISABLE_COMPILE_CACHE" "$SYSTEMD_UNIT" 2>/dev/null; then
+        sudo sed -i '/^\[Service\]/a Environment="NODE_DISABLE_COMPILE_CACHE=1"' "$SYSTEMD_UNIT" 2>/dev/null && \
+          echo "    Updated systemd unit" || true
+      fi
+    fi
+
+    echo "${GREEN}  ✓ Compile cache cleared${RESET}"
+    echo ""
+    echo "  ${YELLOW}⚠ Restart your OpenClaw gateway to load the patched code:${RESET}"
+    echo "    openclaw gateway restart"
+    echo ""
+  fi
+
   echo "  You can now install plugins that use these APIs."
   echo "  When PR #18911 merges upstream, 'openclaw update' includes it natively."
   echo ""
