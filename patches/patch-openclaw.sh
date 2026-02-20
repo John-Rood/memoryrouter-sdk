@@ -141,11 +141,12 @@ patch_dist() {
     return 1
   fi
 
-  # Check if already patched (entry.js + registry chunks + attempt runner must all have the patch)
-  ATTEMPT_FILE=$(grep -l "streamFnWrappers.*attempt runner" "$DIST"/pi-embedded-*.js 2>/dev/null | head -1)
+  # Check if already patched (entry.js + registry chunks + ALL attempt runners must have the patch)
   REGISTRY_PATCHED=$(grep -l "streamFnWrappers" "$DIST"/registry-*.js 2>/dev/null | head -1)
-  if grep -q "streamFnWrappers" "$ENTRY" 2>/dev/null && [ -n "$ATTEMPT_FILE" ] && [ -n "$REGISTRY_PATCHED" ]; then
-    echo "${GREEN}  ✓ Already patched — plugin APIs are present (entry + registry + attempt runner).${RESET}"
+  ATTEMPT_TOTAL=$(grep -l "anthropicPayloadLogger" "$DIST"/*.js 2>/dev/null | wc -l | tr -d ' ')
+  ATTEMPT_PATCHED=$(grep -l "Plugin APIs Patch.*streamFn" "$DIST"/*.js 2>/dev/null | wc -l | tr -d ' ')
+  if grep -q "streamFnWrappers" "$ENTRY" 2>/dev/null && [ -n "$REGISTRY_PATCHED" ] && [ "$ATTEMPT_TOTAL" -gt 0 ] && [ "$ATTEMPT_PATCHED" -ge "$ATTEMPT_TOTAL" ]; then
+    echo "${GREEN}  ✓ Already patched — plugin APIs present (entry + registry + ${ATTEMPT_PATCHED}/${ATTEMPT_TOTAL} attempt runners).${RESET}"
     return 0
   fi
 
@@ -363,17 +364,22 @@ if changes < 3:
 PYEOF
   done
 
-  # Now patch ALL attempt runner files (there can be multiple pi-embedded-*.js)
-  echo "  Finding attempt runner(s)..."
-  ATTEMPT_FILES=$(grep -l "createOpenAIResponsesStoreWrapper\|sanitizeSessionHistory" "$DIST"/pi-embedded-*.js 2>/dev/null | sort -u)
+  # Patch ALL files that run LLM calls (not just pi-embedded-*.js).
+  # The gateway bundles the attempt runner into multiple chunks:
+  #   - pi-embedded-*.js    (agent runner)
+  #   - reply-*.js          (main gateway reply path — index.js loads this)
+  #   - subagent-registry-*.js (subagent calls)
+  # Missing any of these means wrappers register but never apply at runtime.
+  echo "  Finding attempt runner(s) across all dist chunks..."
+  ATTEMPT_FILES=$(grep -l "anthropicPayloadLogger" "$DIST"/*.js 2>/dev/null | sort -u)
 
   if [ -z "$ATTEMPT_FILES" ]; then
     echo "${YELLOW}  ⚠ Could not find attempt runner — streamFn wrappers won't apply at runtime${RESET}"
     echo "${YELLOW}    Plugin will load but won't intercept LLM calls${RESET}"
   else
     for ATTEMPT_FILE in $ATTEMPT_FILES; do
-    # Skip files that are already patched
-    if grep -q "openclaw.pluginRegistryState" "$ATTEMPT_FILE" 2>/dev/null; then
+    # Skip files that are already patched (check for our unique comment marker)
+    if grep -q "OpenClaw Plugin APIs Patch.*streamFn" "$ATTEMPT_FILE" 2>/dev/null; then
       echo "  $(basename "$ATTEMPT_FILE"): already patched ✓"
       continue
     fi
@@ -668,6 +674,12 @@ RESULT=$?
 # Final verification
 if [ "$MODE" = "dist" ]; then
   CHECK_FILE="$ROOT/dist/entry.js"
+  # Also verify the main gateway code path has wrapper injection
+  REPLY_PATCHED=$(grep -l "Plugin APIs Patch.*streamFn" "$ROOT"/dist/reply-*.js 2>/dev/null | head -1)
+  if [ -z "$REPLY_PATCHED" ]; then
+    echo ""
+    echo "${YELLOW}  ⚠ Warning: reply-*.js not patched — gateway replies may not use memory wrappers${RESET}"
+  fi
 else
   CHECK_FILE="$ROOT/src/plugins/registry.ts"
 fi
