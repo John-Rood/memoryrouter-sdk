@@ -111,41 +111,30 @@ fn_block = """	const registerStreamFnWrapper = (record, wrapper) => {
 			source: record.source
 		});
 	};
+	const _readWriteConfig = (mutate) => {
+		const cfgPath = resolveConfigPath();
+		const fs$1 = require("node:fs");
+		let current = {};
+		try { current = JSON.parse(fs$1.readFileSync(cfgPath, "utf-8")); } catch {}
+		mutate(current);
+		fs$1.mkdirSync(require("node:path").dirname(cfgPath), { recursive: true });
+		fs$1.writeFileSync(cfgPath, JSON.stringify(current, null, 2) + "\\n");
+	};
 	const updatePluginConfig = async (record, newConfig) => {
-		const { loadConfig, writeConfigFile } = await import("../config/io.js");
-		const currentConfig = loadConfig();
-		const updated = {
-			...currentConfig,
-			plugins: {
-				...currentConfig.plugins,
-				entries: {
-					...currentConfig.plugins?.entries,
-					[record.id]: {
-						...currentConfig.plugins?.entries?.[record.id],
-						config: newConfig
-					}
-				}
-			}
-		};
-		await writeConfigFile(updated);
+		_readWriteConfig((cfg) => {
+			if (!cfg.plugins) cfg.plugins = {};
+			if (!cfg.plugins.entries) cfg.plugins.entries = {};
+			if (!cfg.plugins.entries[record.id]) cfg.plugins.entries[record.id] = {};
+			cfg.plugins.entries[record.id].config = newConfig;
+		});
 	};
 	const updatePluginEnabled = async (record, enabled) => {
-		const { loadConfig, writeConfigFile } = await import("../config/io.js");
-		const currentConfig = loadConfig();
-		const updated = {
-			...currentConfig,
-			plugins: {
-				...currentConfig.plugins,
-				entries: {
-					...currentConfig.plugins?.entries,
-					[record.id]: {
-						...currentConfig.plugins?.entries?.[record.id],
-						enabled
-					}
-				}
-			}
-		};
-		await writeConfigFile(updated);
+		_readWriteConfig((cfg) => {
+			if (!cfg.plugins) cfg.plugins = {};
+			if (!cfg.plugins.entries) cfg.plugins.entries = {};
+			if (!cfg.plugins.entries[record.id]) cfg.plugins.entries[record.id] = {};
+			cfg.plugins.entries[record.id].enabled = enabled;
+		});
 	};
 """
 anchor_norm = "\tconst normalizeLogger = (logger) =>"
@@ -579,8 +568,70 @@ print('    Updated LaunchAgent plist')
     echo ""
   fi
 
-  echo "  You can now install plugins that use these APIs."
-  echo "  When PR #18911 merges upstream, 'openclaw update' includes it natively."
+  # ================================================================
+  # Install mr-memory plugin
+  # ================================================================
+  echo "  Installing MemoryRouter plugin..."
+
+  # Remove existing extension dir if present (handles upgrade case)
+  MR_EXT="$HOME/.openclaw/extensions/mr-memory"
+  if [ -d "$MR_EXT" ]; then
+    rm -rf "$MR_EXT" 2>/dev/null
+    echo "    Removed existing mr-memory extension"
+  fi
+
+  # Temporarily remove mr-memory from config if present (avoids "plugin not found" loop)
+  OPENCLAW_CFG="$HOME/.openclaw/openclaw.json"
+  MR_BACKUP=""
+  if [ -f "$OPENCLAW_CFG" ] && grep -q "mr-memory" "$OPENCLAW_CFG" 2>/dev/null; then
+    MR_BACKUP=$(python3 -c "
+import json
+with open('$OPENCLAW_CFG') as f:
+    cfg = json.load(f)
+entries = cfg.get('plugins', {}).get('entries', {})
+mr = entries.pop('mr-memory', None)
+if mr:
+    print(json.dumps(mr))
+    with open('$OPENCLAW_CFG', 'w') as f:
+        json.dump(cfg, f, indent=2)
+" 2>/dev/null)
+    if [ -n "$MR_BACKUP" ]; then
+      echo "    Preserved existing mr-memory config"
+    fi
+  fi
+
+  # Install the plugin
+  if command -v openclaw >/dev/null 2>&1; then
+    openclaw plugins install mr-memory 2>&1 | grep -v "^\[" | grep -v "Doctor" | grep -v "migration" | grep -v "^│" | grep -v "^├" | grep -v "^◇" | tail -5
+  else
+    echo "${YELLOW}    ⚠ openclaw not in PATH — run manually: openclaw plugins install mr-memory${RESET}"
+  fi
+
+  # Restore mr-memory config (preserves user's key)
+  if [ -n "$MR_BACKUP" ]; then
+    python3 -c "
+import json
+with open('$OPENCLAW_CFG') as f:
+    cfg = json.load(f)
+if 'plugins' not in cfg: cfg['plugins'] = {}
+if 'entries' not in cfg['plugins']: cfg['plugins']['entries'] = {}
+cfg['plugins']['entries']['mr-memory'] = json.loads('$MR_BACKUP')
+with open('$OPENCLAW_CFG', 'w') as f:
+    json.dump(cfg, f, indent=2)
+print('    Restored mr-memory config (key preserved)')
+" 2>/dev/null
+  fi
+
+  echo ""
+  echo "${GREEN}  ✅ MemoryRouter plugin installed!${RESET}"
+  echo ""
+  echo "  ${YELLOW}⚠ Restart your OpenClaw gateway:${RESET}"
+  echo "    openclaw gateway restart"
+  echo ""
+  echo "  Then enable with your memory key:"
+  echo "    openclaw mr <your-memory-key>"
+  echo ""
+  echo "  Get a free key at: ${BOLD}https://app.memoryrouter.ai${RESET}"
   echo ""
 else
   echo "${RED}  ✗ Patch verification failed${RESET}"
