@@ -68,9 +68,10 @@ patch_dist() {
     return 1
   fi
 
-  # Check if already patched
-  if grep -q "streamFnWrappers" "$ENTRY" 2>/dev/null; then
-    echo "${GREEN}  ✓ Already patched — plugin APIs are present.${RESET}"
+  # Check if already patched (both entry.js AND attempt runner must have the patch)
+  ATTEMPT_FILE=$(grep -l "streamFnWrappers.*attempt runner" "$DIST"/pi-embedded-*.js 2>/dev/null | head -1)
+  if grep -q "streamFnWrappers" "$ENTRY" 2>/dev/null && [ -n "$ATTEMPT_FILE" ]; then
+    echo "${GREEN}  ✓ Already patched — plugin APIs are present (both locations).${RESET}"
     return 0
   fi
 
@@ -238,19 +239,19 @@ wrapper_block = """
 	}
 """
 
-# Insert after createOpenAIResponsesStoreWrapper line
+# Patch Location 1: after createOpenAIResponsesStoreWrapper (one-time agent setup)
 anchor = "agent.streamFn = createOpenAIResponsesStoreWrapper(agent.streamFn);\n}"
 if anchor in code:
     code = code.replace(anchor, anchor + wrapper_block, 1)
-    print("  attempt runner: patched (after createOpenAIResponsesStoreWrapper)")
+    print("  location 1: patched (after createOpenAIResponsesStoreWrapper)")
 else:
-    # Try second code path — after anthropicPayloadLogger wrapper, before sanitizeSessionHistory
-    # Look for the pattern: activeSession.agent.streamFn = anthropicPayloadLogger...
-    # followed by try { const prior = await sanitizeSessionHistory
-    import re
-    pattern = r'(if \(anthropicPayloadLogger\) activeSession\.agent\.streamFn = anthropicPayloadLogger\.wrapStreamFn\(activeSession\.agent\.streamFn\);)'
-    wrapper_block2 = """
-			// [OpenClaw Plugin APIs Patch] Apply plugin-registered streamFn wrappers
+    print("  location 1: anchor not found (may be OK if version differs)")
+
+# Patch Location 2: after anthropicPayloadLogger (per-turn attempt runner — THIS IS THE CRITICAL ONE)
+import re
+pattern = r'(if \(anthropicPayloadLogger\) activeSession\.agent\.streamFn = anthropicPayloadLogger\.wrapStreamFn\(activeSession\.agent\.streamFn\);)'
+wrapper_block2 = """
+			// [OpenClaw Plugin APIs Patch] Apply plugin-registered streamFn wrappers (attempt runner)
 			{
 				const _regSym = Symbol.for("openclaw.pluginRegistryState");
 				const _regState = globalThis[_regSym];
@@ -260,13 +261,13 @@ else:
 					}
 				}
 			}"""
-    match = re.search(pattern, code)
-    if match:
-        code = code.replace(match.group(0), match.group(0) + wrapper_block2, 1)
-        print("  attempt runner: patched (after anthropicPayloadLogger)")
-    else:
-        print("  WARNING: Could not find attempt runner anchor")
-        sys.exit(1)
+match = re.search(pattern, code)
+if match:
+    code = code.replace(match.group(0), match.group(0) + wrapper_block2, 1)
+    print("  location 2: patched (after anthropicPayloadLogger — attempt runner)")
+else:
+    print("  WARNING: Could not find attempt runner anchor (anthropicPayloadLogger)")
+    sys.exit(1)
 
 with open(attempt_path, "w") as f:
     f.write(code)
