@@ -202,20 +202,20 @@ if changes < 4:
     sys.exit(1)
 PYEOF
 
-  # Now patch the attempt runner
-  echo "  Finding attempt runner..."
-  # Find the pi-embedded file that has the streamFn wrappers
-  ATTEMPT_FILE=$(grep -l "createOpenAIResponsesStoreWrapper" "$DIST"/pi-embedded-*.js 2>/dev/null | head -1)
+  # Now patch ALL attempt runner files (there can be multiple pi-embedded-*.js)
+  echo "  Finding attempt runner(s)..."
+  ATTEMPT_FILES=$(grep -l "createOpenAIResponsesStoreWrapper\|sanitizeSessionHistory" "$DIST"/pi-embedded-*.js 2>/dev/null | sort -u)
 
-  if [ -z "$ATTEMPT_FILE" ]; then
-    # Try alternate anchor
-    ATTEMPT_FILE=$(grep -l "sanitizeSessionHistory" "$DIST"/pi-embedded-*.js 2>/dev/null | head -1)
-  fi
-
-  if [ -z "$ATTEMPT_FILE" ]; then
+  if [ -z "$ATTEMPT_FILES" ]; then
     echo "${YELLOW}  ⚠ Could not find attempt runner — streamFn wrappers won't apply at runtime${RESET}"
     echo "${YELLOW}    Plugin will load but won't intercept LLM calls${RESET}"
   else
+    for ATTEMPT_FILE in $ATTEMPT_FILES; do
+    # Skip files that are already patched
+    if grep -q "openclaw.pluginRegistryState" "$ATTEMPT_FILE" 2>/dev/null; then
+      echo "  $(basename "$ATTEMPT_FILE"): already patched ✓"
+      continue
+    fi
     echo "  Patching $(basename "$ATTEMPT_FILE")..."
 
     ATTEMPT_PATH="$ATTEMPT_FILE" python3 << 'PYEOF'
@@ -272,6 +272,7 @@ else:
 with open(attempt_path, "w") as f:
     f.write(code)
 PYEOF
+    done
   fi
 
   # Clear Node compile cache
