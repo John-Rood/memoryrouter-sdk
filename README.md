@@ -6,7 +6,28 @@
 
 ---
 
-## Quick Start
+## mr-memory — OpenClaw Plugin
+
+Using OpenClaw? Install the **mr-memory OpenClaw plugin** in one command:
+
+```bash
+openclaw plugins install mr-memory
+openclaw mr <your-memory-key>   # Get a key at memoryrouter.ai
+```
+
+Your agent gets persistent semantic memory that survives compaction, session resets, and restarts. Every conversation builds on the last one — automatically.
+
+- **One command install** — `openclaw plugins install mr-memory`
+- **Full fidelity recall** — stores raw conversations, not lossy summaries
+- **Continuous** — injects relevant context on every message, not just session start
+- **BYOK** — your provider API keys never leave OpenClaw
+- **50M tokens free** — no credit card required
+
+---
+
+## API — Direct Integration
+
+Not using OpenClaw? Use the API directly with any app or framework.
 
 ### 1. Get your Memory Key
 
@@ -69,6 +90,7 @@ See the [full model list](https://docs.memoryrouter.ai/api-reference#supported-m
 - **Customer Support** — Bots that know customer history
 - **Personal AI** — Apps that learn and adapt over time
 - **Multi-session Apps** — Maintain context across conversations
+- **OpenClaw Agents** — Install the **mr-memory OpenClaw plugin** for persistent agent memory
 
 ---
 
