@@ -815,7 +815,7 @@ print('    Restored mr-memory config (key preserved)')
   echo "  Then enable with your memory key:"
   echo "    openclaw mr <your-memory-key>"
   echo ""
-  echo "  Get a free key at: ${BOLD}https://app.memoryrouter.ai${RESET}"
+  echo "  Get your Memory Key at: ${BOLD}https://app.memoryrouter.ai${RESET}"
   echo ""
 else
   echo "${RED}  ✗ Patch verification failed${RESET}"

@@ -1,108 +1,99 @@
 # MemoryRouter
 
-**Persistent memory for any AI model.** One API that adds long-term memory to ChatGPT, Claude, Gemini, Grok, and 90+ other models.
+**One memory for every AI you use.** MemoryRouter lets people carry approved context from ChatGPT to Claude and other AI tools, while giving product teams private, persistent memory for every user through APIs and MCP.
 
-🌐 [Homepage](https://memoryrouter.ai) · 📚 [Documentation](https://docs.memoryrouter.ai) · 🎮 [Dashboard](https://app.memoryrouter.ai/)
+[Homepage](https://memoryrouter.ai) · [Start free](https://app.memoryrouter.ai/signup) · [Documentation](https://docs.memoryrouter.ai) · [Pricing](https://memoryrouter.ai/pricing) · [Security](https://memoryrouter.ai/security) · [Releases](https://github.com/John-Rood/memoryrouter-sdk/releases)
 
----
+## Choose your path
 
-## mr-memory — OpenClaw Plugin
+| I want to… | Start here |
+| --- | --- |
+| Move useful context from ChatGPT to Claude | [Transfer your memories](https://memoryrouter.ai) |
+| Connect Claude, ChatGPT, Codex, OpenClaw, or another MCP client | [MCP and connector guide](https://memoryrouter.ai/mcp) |
+| Give OpenClaw automatic persistent memory | [OpenClaw setup](https://docs.memoryrouter.ai/openclaw) |
+| Add user-scoped memory to an AI product | [Developer quickstart](https://docs.memoryrouter.ai/quickstart) |
+| Install the MemoryRouter CLI | [Latest CLI release](https://github.com/John-Rood/memoryrouter-sdk/releases/latest) |
 
-Using OpenClaw? Install the **mr-memory OpenClaw plugin** in one command:
+## Connect AI tools with MCP
 
-```bash
-openclaw plugins install mr-memory
-openclaw mr <your-memory-key>   # Get a key at memoryrouter.ai
+MemoryRouter exposes a remote MCP server at:
+
+```text
+https://mcp.memoryrouter.ai/mcp
 ```
 
-Your agent gets persistent semantic memory that survives compaction, session resets, and restarts. Every conversation builds on the last one — automatically.
+Connect supported hosts through OAuth, choose a vault and permissions, then verify access with the host's visible MemoryRouter tools. Hosted connectors are model-directed: connecting does not automatically import old conversations or guarantee a memory call on every turn.
 
-- **One command install** — `openclaw plugins install mr-memory`
-- **Full fidelity recall** — stores raw conversations, not lossy summaries
-- **Continuous** — injects relevant context on every message, not just session start
-- **BYOK** — your provider API keys never leave OpenClaw
-- **50M tokens free** — no credit card required
+See the [MCP overview](https://memoryrouter.ai/mcp) for exact setup and host-specific behavior.
 
----
+## OpenClaw plugin
 
-## API — Direct Integration
+Install the current audited npm package:
 
-Not using OpenClaw? Use the API directly with any app or framework.
+```bash
+openclaw plugins install npm:mr-memory@3.7.8
+openclaw mr <your-memory-key>
+openclaw mr status
+```
 
-### 1. Get your Memory Key
+The plugin provides relay-based recall and capture while inference and provider credentials stay inside OpenClaw. Historical workspace and session upload is a separate, explicit operation:
 
-Sign up at [memoryrouter.ai](https://memoryrouter.ai) and grab your memory key from the dashboard.
+```bash
+openclaw mr upload
+```
 
-### 2. Make a request
+Read the [OpenClaw documentation](https://docs.memoryrouter.ai/openclaw) before enabling it, especially if you use multiple agents or custom paths.
+
+## API quickstart
+
+MemoryRouter supports two production patterns:
+
+- **Proxy mode:** send the model request through MemoryRouter; it retrieves memory, calls the provider, and stores the completed exchange.
+- **Local inference mode:** keep the provider call in your app and use `/v1/memory/prepare` plus `/v1/memory/ingest` for retrieval and storage only.
+
+One stable Memory Key identifies one private user vault. Here is the OpenAI-compatible proxy path:
 
 ```bash
 curl https://api.memoryrouter.ai/v1/chat/completions \
+  -H "Authorization: Bearer $MEMORYROUTER_KEY" \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_MEMORY_KEY" \
   -d '{
-    "model": "openai/gpt-4o",
-    "messages": [{"role": "user", "content": "Remember that my favorite color is blue."}]
+    "model": "openai/gpt-5.5",
+    "messages": [
+      {"role": "user", "content": "Remember that I prefer concise answers."}
+    ]
   }'
 ```
 
-### 3. It remembers
+For per-user key provisioning, local inference, native Anthropic and Google endpoints, imports, and deletion, use the [developer quickstart](https://docs.memoryrouter.ai/quickstart) and [API reference](https://docs.memoryrouter.ai/api-reference).
+
+## CLI releases
+
+The [Releases page](https://github.com/John-Rood/memoryrouter-sdk/releases) publishes MemoryRouter CLI binaries for macOS and Linux. Install the current release with:
 
 ```bash
-curl https://api.memoryrouter.ai/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_MEMORY_KEY" \
-  -d '{
-    "model": "openai/gpt-4o",
-    "messages": [{"role": "user", "content": "What is my favorite color?"}]
-  }'
+curl -fsSL https://memoryrouter.ai/install.sh | sh
+memoryrouter auth <your-memory-key>
+memoryrouter status
 ```
 
-The AI now remembers your favorite color is blue — across sessions, devices, and even different models.
+The `patches/` directory contains legacy OpenClaw plugin-API patch helpers for historical builds. Current OpenClaw users should follow the published npm installation path above instead of applying a legacy patch.
 
----
+## Pricing
 
-## Features
+MemoryRouter pricing and allowances vary by product path and can change. Use the live [pricing page](https://memoryrouter.ai/pricing) and the relevant integration guide rather than older README quota claims.
 
-- **Drop-in replacement** — Works with your existing code, just change the base URL
-- **Works with any model** — OpenAI, Anthropic, Google, xAI (90+ models)
-- **Automatic memory** — No manual embedding or retrieval code
-- **Cross-model memory** — Start with GPT, continue with Claude
-- **Bring your own keys** — Use your existing API keys, we just add memory
+## Support and trust
 
----
+- Product and account help: [hello@memoryrouter.ai](mailto:hello@memoryrouter.ai)
+- Security policy: [SECURITY.md](SECURITY.md)
+- Support policy: [SUPPORT.md](SUPPORT.md)
+- Contribution guide: [CONTRIBUTING.md](CONTRIBUTING.md)
+- Privacy: [memoryrouter.ai/privacy](https://memoryrouter.ai/privacy)
+- Terms: [memoryrouter.ai/terms](https://memoryrouter.ai/terms)
 
-## Supported Providers
-
-| Provider | Prefix | Example Models |
-|----------|--------|----------------|
-| OpenAI | `openai/` | gpt-4o, gpt-4-turbo, o1, o3 |
-| Anthropic | `anthropic/` | claude-sonnet-4, claude-opus-4 |
-| Google | `google/` | gemini-2.0-flash, gemini-2.5-pro |
-| xAI | `x-ai/` | grok-2, grok-3 |
-
-See the [full model list](https://docs.memoryrouter.ai/api-reference#supported-models) in our docs.
-
----
-
-## Use Cases
-
-- **AI Assistants** — Build assistants that remember user preferences
-- **Customer Support** — Bots that know customer history
-- **Personal AI** — Apps that learn and adapt over time
-- **Multi-session Apps** — Maintain context across conversations
-- **OpenClaw Agents** — Install the **mr-memory OpenClaw plugin** for persistent agent memory
-
----
-
-## Links
-
-- 🌐 **Website:** [memoryrouter.ai](https://memoryrouter.ai)
-- 📚 **Docs:** [docs.memoryrouter.ai](https://docs.memoryrouter.ai)
-- 🎮 **Dashboard:** [memoryrouter.ai/dashboard](https://memoryrouter.ai/dashboard)
-- 📧 **Support:** john@memoryrouter.ai
-
----
+Never post a live Memory Key, provider credential, or private memory content in a GitHub issue.
 
 ## License
 
-MIT
+The public files in this repository are available under the [MIT License](LICENSE).
